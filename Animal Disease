@@ -1,0 +1,1065 @@
+Line:6 FireOnShootStateTime
+Line:34 PlayerMovement
+Line:760 WeaponDefinition
+Line:847 WeaponManager
+
+using UnityEngine;
+
+public class FireOnShootStateTime : StateMachineBehaviour
+{
+    public float fireAtNormalizedTime = 0.5f; // 0.5 = keskellä animaatiota
+    private bool fired;
+
+    public override void OnStateEnter(Animator animator, AnimatorStateInfo stateInfo, int layerIndex)
+    {
+        fired = false;
+    }
+
+    public override void OnStateUpdate(Animator animator, AnimatorStateInfo stateInfo, int layerIndex)
+    {
+        if (fired) return;
+
+        float t = stateInfo.normalizedTime % 1f;
+        if (t >= fireAtNormalizedTime)
+        {
+            fired = true;
+
+            var def = animator.GetComponentInParent<FPSWeaponDefinition>();
+            if (def != null)
+                def.FireProjectile();
+        }
+    }
+}
+
+using UnityEngine; 
+
+using System.Collections.Generic; 
+
+ 
+
+[RequireComponent(typeof(CharacterController))] 
+
+public class SimpleFPS_AllInOne : MonoBehaviour 
+
+{ 
+
+    [Header("References")] 
+
+    public Transform cameraPivot; 
+
+ 
+
+    [Tooltip("Animator for hands/arms (MASTER).")] 
+
+    public Animator handsAnimator; 
+
+ 
+
+    [Tooltip("Animator on the currently active weapon object (SLAVE). Set by WeaponManager.")] 
+
+    public Animator weaponAnimator; 
+
+ 
+
+    [Header("Movement")] 
+
+    public float walkSpeed = 4.5f; 
+
+    public float runSpeed = 7.5f; 
+
+    public float gravity = -18f; 
+
+ 
+
+    [Header("Look")] 
+
+    public float mouseSensitivity = 2.0f; 
+
+    public float minPitch = -85f; 
+
+    public float maxPitch = 85f; 
+
+ 
+
+    [Header("Animator Params")] 
+
+    public string isMovingParam = "IsMoving"; 
+
+    public string isRunningParam = "IsRunning"; 
+
+    public string isScopedParam = "IsScoped"; 
+
+ 
+
+    [Header("Animator Layers")] 
+
+    public string scopeLayerName = "Scope"; 
+
+    public float scopeBlendInSpeed = 18f; 
+
+    public float scopeBlendOutSpeed = 10f; 
+
+ 
+
+    [Header("Scope Anti-Spam + Sync Gate")] 
+
+    [Tooltip("Minimum time between scope toggles. RMB spam during this time is ignored.")] 
+
+    public float scopeMinToggleInterval = 0.15f; 
+
+ 
+
+    [Tooltip("How close layer weight must be to target (0 or 1) before we allow a new toggle / firing in scope.")] 
+
+    [Range(0.001f, 0.1f)] 
+
+    public float scopeEpsilon = 0.02f; 
+
+ 
+
+    [Header("Action Lock (only Action layer)")] 
+
+    public string actionLayerName = "Action"; 
+
+    public string actionStateTag = "Action"; 
+
+    [Range(0f, 0.25f)] 
+
+    public float actionEndTolerance = 0.05f; 
+
+ 
+
+    // WeaponManager sets this per weapon 
+
+    public bool AllowScope { get; set; } = true; 
+
+ 
+
+    private CharacterController cc; 
+
+    private float pitch; 
+
+    private float verticalVelocity; 
+
+ 
+
+    private int handsScopeLayerIndex = -1; 
+
+    private int weaponScopeLayerIndex = -1; 
+
+ 
+
+    private int handsActionLayerIndex = -1; 
+
+    private int weaponActionLayerIndex = -1; 
+
+    private int actionTagHash; 
+
+ 
+
+    private float scopeLayerWeight = 0f; 
+
+ 
+
+    // scope gating state 
+
+    private bool scopeTarget = false;                // stable target state 
+
+    private float lastScopeToggleTime = -999f; 
+
+ 
+
+    public bool IsMoving { get; private set; } 
+
+    public bool IsRunning { get; private set; } 
+
+    public bool IsScoped { get; private set; } 
+
+ 
+
+    /// <summary>True while scope is blending (not at 0 or 1), or scope layer is transitioning.</summary> 
+
+    public bool IsScopeBusy { get; private set; } 
+
+ 
+
+    /// <summary>True when Action layer is playing Action-tagged state (or transitioning into one).</summary> 
+
+    public bool IsActionBusy { get; private set; } 
+
+ 
+
+    /// <summary>Use this to allow gun actions only when scope and action are stable.</summary> 
+
+    public bool CanStartGunAction => !IsActionBusy && !IsScopeBusy; 
+
+ 
+
+    private HashSet<int> handsParams = new HashSet<int>(); 
+
+    private HashSet<int> weaponParams = new HashSet<int>(); 
+
+ 
+
+    void Awake() 
+
+    { 
+
+        cc = GetComponent<CharacterController>(); 
+
+ 
+
+        if (cameraPivot == null) 
+
+        { 
+
+            Camera cam = GetComponentInChildren<Camera>(); 
+
+            if (cam != null) cameraPivot = cam.transform; 
+
+        } 
+
+ 
+
+        actionTagHash = Animator.StringToHash(actionStateTag); 
+
+ 
+
+        RebuildParamCache(); 
+
+        CacheScopeLayers(); 
+
+        CacheActionLayers(); 
+
+ 
+
+        // Force same update behavior -> helps sync 
+
+        if (handsAnimator != null) 
+
+        { 
+
+            handsAnimator.updateMode = AnimatorUpdateMode.Normal; 
+
+            handsAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate; 
+
+        } 
+
+        if (weaponAnimator != null) 
+
+        { 
+
+            weaponAnimator.updateMode = AnimatorUpdateMode.Normal; 
+
+            weaponAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate; 
+
+        } 
+
+ 
+
+        Cursor.lockState = CursorLockMode.Locked; 
+
+        Cursor.visible = false; 
+
+    } 
+
+ 
+
+    void Update() 
+
+    { 
+
+        // LOOK 
+
+        float mouseX = Input.GetAxis("Mouse X") * mouseSensitivity; 
+
+        float mouseY = Input.GetAxis("Mouse Y") * mouseSensitivity; 
+
+ 
+
+        transform.Rotate(0f, mouseX, 0f); 
+
+ 
+
+        pitch -= mouseY; 
+
+        pitch = Mathf.Clamp(pitch, minPitch, maxPitch); 
+
+        if (cameraPivot != null) 
+
+            cameraPivot.localEulerAngles = new Vector3(pitch, 0f, 0f); 
+
+ 
+
+        // MOVE 
+
+        float x = Input.GetAxisRaw("Horizontal"); 
+
+        float z = Input.GetAxisRaw("Vertical"); 
+
+ 
+
+        Vector3 move = transform.right * x + transform.forward * z; 
+
+        move = Vector3.ClampMagnitude(move, 1f); 
+
+ 
+
+        IsMoving = move.sqrMagnitude > 0.001f; 
+
+        IsRunning = IsMoving && 
+
+                    (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)); 
+
+ 
+
+        float speed = IsRunning ? runSpeed : walkSpeed; 
+
+ 
+
+        if (cc.isGrounded && verticalVelocity < 0f) 
+
+            verticalVelocity = -2f; 
+
+ 
+
+        verticalVelocity += gravity * Time.deltaTime; 
+
+ 
+
+        Vector3 velocity = move * speed; 
+
+        velocity.y = verticalVelocity; 
+
+ 
+
+        cc.Move(velocity * Time.deltaTime); 
+
+ 
+
+        // --- SCOPE INPUT (anti-spam + stable target) --- 
+
+        bool holdScopeInput = AllowScope && Input.GetMouseButton(1); 
+
+ 
+
+        float targetWeight = scopeTarget ? 1f : 0f; 
+
+        bool atTarget = Mathf.Abs(scopeLayerWeight - targetWeight) <= scopeEpsilon; 
+
+        bool cooldownOk = (Time.time - lastScopeToggleTime) >= scopeMinToggleInterval; 
+
+ 
+
+        // Only allow target flip when: 
+
+        // 1) cooldown passed 
+
+        // 2) we are at previous target (not mid blend) 
+
+        // => RMB spam does nothing 
+
+        if (holdScopeInput != scopeTarget && cooldownOk && atTarget) 
+
+        { 
+
+            scopeTarget = holdScopeInput; 
+
+            lastScopeToggleTime = Time.time; 
+
+        } 
+
+ 
+
+        IsScoped = scopeTarget; 
+
+ 
+
+        // Apply SAME scope weight to both animators every frame 
+
+        UpdateScopeLayerWeight(scopeTarget); 
+
+ 
+
+        // Busy if not at target OR scope layer is transitioning 
+
+        IsScopeBusy = !IsScopeAtTarget() || IsScopeLayerInTransition(); 
+
+ 
+
+        // Params (if exist) 
+
+        SetBoolAll(isMovingParam, IsMoving); 
+
+        SetBoolAll(isRunningParam, IsRunning); 
+
+        SetBoolAll(isScopedParam, IsScoped); 
+
+ 
+
+        // Action busy (only Action layer) 
+
+        IsActionBusy = IsAnimatorActionBusy(handsAnimator, handsActionLayerIndex) || 
+
+                       IsAnimatorActionBusy(weaponAnimator, weaponActionLayerIndex); 
+
+ 
+
+        if (Input.GetKeyDown(KeyCode.Escape)) 
+
+        { 
+
+            Cursor.lockState = CursorLockMode.None; 
+
+            Cursor.visible = true; 
+
+        } 
+
+    } 
+
+ 
+
+    public void SetAnimators(Animator newHands, Animator newWeapon) 
+
+    { 
+
+        handsAnimator = newHands; 
+
+        weaponAnimator = newWeapon; 
+
+ 
+
+        RebuildParamCache(); 
+
+        CacheScopeLayers(); 
+
+        CacheActionLayers(); 
+
+ 
+
+        if (handsAnimator != null) 
+
+        { 
+
+            handsAnimator.updateMode = AnimatorUpdateMode.Normal; 
+
+            handsAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate; 
+
+            handsAnimator.Rebind(); 
+
+            handsAnimator.Update(0f); 
+
+        } 
+
+ 
+
+        if (weaponAnimator != null) 
+
+        { 
+
+            weaponAnimator.updateMode = AnimatorUpdateMode.Normal; 
+
+            weaponAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate; 
+
+            weaponAnimator.Rebind(); 
+
+            weaponAnimator.Update(0f); 
+
+        } 
+
+ 
+
+        // Reset scope sync state on weapon swap 
+
+        scopeTarget = false; 
+
+        scopeLayerWeight = 0f; 
+
+        lastScopeToggleTime = -999f; 
+
+ 
+
+        // Ensure weights are identical immediately 
+
+        ApplyScopeWeightToAnimators(0f); 
+
+    } 
+
+ 
+
+    public void TriggerHandsAndWeapon(string triggerName) 
+
+    { 
+
+        if (string.IsNullOrEmpty(triggerName)) return; 
+
+ 
+
+        int h = Animator.StringToHash(triggerName); 
+
+ 
+
+        if (handsAnimator != null && handsParams.Contains(h)) 
+
+            handsAnimator.SetTrigger(triggerName); 
+
+ 
+
+        if (weaponAnimator != null && weaponParams.Contains(h)) 
+
+            weaponAnimator.SetTrigger(triggerName); 
+
+    } 
+
+ 
+
+    public bool TryTriggerHandsAndWeaponAction(string triggerName) 
+
+    { 
+
+        if (string.IsNullOrEmpty(triggerName)) return false; 
+
+ 
+
+        bool busy = IsAnimatorActionBusy(handsAnimator, handsActionLayerIndex) || 
+
+                    IsAnimatorActionBusy(weaponAnimator, weaponActionLayerIndex); 
+
+ 
+
+        if (busy) return false; 
+
+ 
+
+        TriggerHandsAndWeapon(triggerName); 
+
+        return true; 
+
+    } 
+
+ 
+
+    private void SetBoolAll(string param, bool value) 
+
+    { 
+
+        if (string.IsNullOrEmpty(param)) return; 
+
+        int h = Animator.StringToHash(param); 
+
+ 
+
+        if (handsAnimator != null && handsParams.Contains(h)) 
+
+            handsAnimator.SetBool(param, value); 
+
+ 
+
+        if (weaponAnimator != null && weaponParams.Contains(h)) 
+
+            weaponAnimator.SetBool(param, value); 
+
+    } 
+
+ 
+
+    private void RebuildParamCache() 
+
+    { 
+
+        handsParams.Clear(); 
+
+        weaponParams.Clear(); 
+
+ 
+
+        if (handsAnimator != null) 
+
+        { 
+
+            foreach (var p in handsAnimator.parameters) 
+
+                handsParams.Add(p.nameHash); 
+
+        } 
+
+ 
+
+        if (weaponAnimator != null) 
+
+        { 
+
+            foreach (var p in weaponAnimator.parameters) 
+
+                weaponParams.Add(p.nameHash); 
+
+        } 
+
+    } 
+
+ 
+
+    private void CacheScopeLayers() 
+
+    { 
+
+        handsScopeLayerIndex = -1; 
+
+        weaponScopeLayerIndex = -1; 
+
+ 
+
+        if (handsAnimator != null) 
+
+        { 
+
+            handsScopeLayerIndex = handsAnimator.GetLayerIndex(scopeLayerName); 
+
+            if (handsScopeLayerIndex != -1) handsAnimator.SetLayerWeight(handsScopeLayerIndex, 0f); 
+
+        } 
+
+ 
+
+        if (weaponAnimator != null) 
+
+        { 
+
+            weaponScopeLayerIndex = weaponAnimator.GetLayerIndex(scopeLayerName); 
+
+            if (weaponScopeLayerIndex != -1) weaponAnimator.SetLayerWeight(weaponScopeLayerIndex, 0f); 
+
+        } 
+
+    } 
+
+ 
+
+    private void CacheActionLayers() 
+
+    { 
+
+        handsActionLayerIndex = -1; 
+
+        weaponActionLayerIndex = -1; 
+
+ 
+
+        if (handsAnimator != null) 
+
+            handsActionLayerIndex = handsAnimator.GetLayerIndex(actionLayerName); 
+
+ 
+
+        if (weaponAnimator != null) 
+
+            weaponActionLayerIndex = weaponAnimator.GetLayerIndex(actionLayerName); 
+
+    } 
+
+ 
+
+    private bool IsAnimatorActionBusy(Animator anim, int actionLayerIndex) 
+
+    { 
+
+        if (anim == null || actionLayerIndex == -1) return false; 
+
+ 
+
+        if (anim.IsInTransition(actionLayerIndex)) 
+
+        { 
+
+            var next = anim.GetNextAnimatorStateInfo(actionLayerIndex); 
+
+            if (next.tagHash == actionTagHash) return true; 
+
+        } 
+
+ 
+
+        var cur = anim.GetCurrentAnimatorStateInfo(actionLayerIndex); 
+
+ 
+
+        if (cur.tagHash != actionTagHash) return false; 
+
+        if (cur.loop) return true; 
+
+ 
+
+        return cur.normalizedTime < (1f - actionEndTolerance); 
+
+    } 
+
+ 
+
+    private void UpdateScopeLayerWeight(bool wantScope) 
+
+    { 
+
+        float target = wantScope ? 1f : 0f; 
+
+        float speed = wantScope ? scopeBlendInSpeed : scopeBlendOutSpeed; 
+
+ 
+
+        scopeLayerWeight = Mathf.MoveTowards(scopeLayerWeight, target, speed * Time.deltaTime); 
+
+        ApplyScopeWeightToAnimators(scopeLayerWeight); 
+
+    } 
+
+ 
+
+    private void ApplyScopeWeightToAnimators(float w) 
+
+    { 
+
+        if (handsAnimator != null && handsScopeLayerIndex != -1) 
+
+            handsAnimator.SetLayerWeight(handsScopeLayerIndex, w); 
+
+ 
+
+        if (weaponAnimator != null && weaponScopeLayerIndex != -1) 
+
+            weaponAnimator.SetLayerWeight(weaponScopeLayerIndex, w); 
+
+    } 
+
+ 
+
+    private bool IsScopeAtTarget() 
+
+    { 
+
+        float target = scopeTarget ? 1f : 0f; 
+
+        return Mathf.Abs(scopeLayerWeight - target) <= scopeEpsilon; 
+
+    } 
+
+ 
+
+    private bool IsScopeLayerInTransition() 
+
+    { 
+
+        bool handsTrans = handsAnimator != null && handsScopeLayerIndex != -1 && handsAnimator.IsInTransition(handsScopeLayerIndex); 
+
+        bool weapTrans = weaponAnimator != null && weaponScopeLayerIndex != -1 && weaponAnimator.IsInTransition(weaponScopeLayerIndex); 
+
+        return handsTrans || weapTrans; 
+
+    } 
+
+} 
+
+using UnityEngine;
+
+public enum FPSWeaponType { Gun, Knife }
+
+public class FPSWeaponDefinition : MonoBehaviour
+{
+    [Header("Type")]
+    public FPSWeaponType weaponType = FPSWeaponType.Gun;
+
+    [Header("Enable/Disable Root (THIS object will be toggled on/off)")]
+    public GameObject weaponRoot;
+
+    [Header("Animators")]
+    public Animator weaponAnimator;
+    public RuntimeAnimatorController weaponController;
+    public RuntimeAnimatorController handsController;
+
+    [Header("Capabilities")]
+    public bool supportsScope = true;
+    public bool supportsReload = true;
+
+    [Header("Triggers (optional)")]
+    public string primaryTrigger = "Shoot";
+    public string secondaryTrigger = "";
+    public string reloadTrigger = "Reload";
+    public string inspectTrigger = "Inspect";
+
+    [Header("Equip / Holster (optional)")]
+    public string pullDownTrigger = "PullDown";
+    public string pullOutTrigger = "PullOut";
+
+    [Header("Projectile (Gun only)")]
+    public GameObject projectilePrefab;
+    public Transform muzzle;
+    public float muzzleVelocity = 70f;
+    public float projectileLifetime = 4f;
+    public float spawnForwardOffset = 0.02f;
+
+    private void Awake() => AutoFill();
+    private void Reset() => AutoFill();
+    private void OnValidate() => AutoFill();
+
+    private void AutoFill()
+    {
+        if (weaponRoot == null) weaponRoot = gameObject;
+        if (weaponAnimator == null) weaponAnimator = GetComponentInChildren<Animator>();
+
+        if (muzzle == null)
+        {
+            var baseT = weaponAnimator != null ? weaponAnimator.transform : transform;
+            muzzle = FindDeepChild(baseT, "Muzzle");
+        }
+    }
+
+    private static Transform FindDeepChild(Transform parent, string childName)
+    {
+        if (parent == null) return null;
+
+        foreach (Transform child in parent)
+        {
+            if (child.name == childName) return child;
+
+            var found = FindDeepChild(child, childName);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    public void FireProjectile()
+    {
+        if (weaponType != FPSWeaponType.Gun) return;
+        if (projectilePrefab == null) return;
+
+        Transform m = muzzle != null ? muzzle : (weaponAnimator != null ? weaponAnimator.transform : transform);
+        Vector3 spawnPos = m.position + m.forward * spawnForwardOffset;
+
+        GameObject proj = Instantiate(projectilePrefab, spawnPos, m.rotation);
+
+        if (projectileLifetime > 0f)
+            Destroy(proj, projectileLifetime);
+
+        Rigidbody rb = proj.GetComponent<Rigidbody>();
+        if (rb != null)
+            rb.linearVelocity = proj.transform.forward * muzzleVelocity;
+    }
+}
+
+using UnityEngine;
+using System.Linq;
+using System.Collections;
+
+public class FPSWeaponManager : MonoBehaviour
+{
+    [Header("References")]
+    public SimpleFPS_AllInOne player;
+    public Animator handsAnimator;
+
+    [Tooltip("Optional: auto-finds weapons under this transform if Weapons array is empty.")]
+    public Transform weaponHolder;
+
+    [Header("Weapons (order = cycling order)")]
+    public FPSWeaponDefinition[] weapons;
+    public int startIndex = 0;
+
+    [Header("Keys")]
+    public KeyCode switchKey = KeyCode.E;
+
+    [Header("Switch Settings")]
+    public bool blockSwitchWhileActionBusy = true;
+    public float postEnableDelay = 0.02f;
+
+    [Header("Debug")]
+    public bool logWeaponSwitch = false;
+
+    private int currentIndex = -1;
+    private FPSWeaponDefinition current;
+    private bool knifeAlt = false;
+    private bool isSwitching = false;
+
+    void Awake()
+    {
+        if (player == null) player = GetComponent<SimpleFPS_AllInOne>();
+        if (handsAnimator == null && player != null) handsAnimator = player.handsAnimator;
+
+        if (weaponHolder == null && player != null)
+        {
+            var t = player.transform.Find("CameraPivot/WeaponHolder");
+            if (t != null) weaponHolder = t;
+        }
+
+        if ((weapons == null || weapons.Length == 0) && weaponHolder != null)
+        {
+            weapons = weaponHolder.GetComponentsInChildren<FPSWeaponDefinition>(true)
+                                  .OrderBy(w => w.name)
+                                  .ToArray();
+        }
+
+        if (weapons != null)
+        {
+            foreach (var w in weapons)
+            {
+                if (w == null) continue;
+                if (w.weaponRoot == null) w.weaponRoot = w.gameObject;
+                if (w.weaponAnimator == null) w.weaponAnimator = w.GetComponentInChildren<Animator>();
+            }
+        }
+    }
+
+    void Start()
+    {
+        if (weapons == null || weapons.Length == 0)
+        {
+            Debug.LogError("FPSWeaponManager: No weapons found. Make sure your weapon objects have FPSWeaponDefinition and are assigned/found.");
+            return;
+        }
+
+        DisableAllWeapons();
+        EquipInstant(startIndex);
+    }
+
+    void Update()
+    {
+        if (current == null || player == null) return;
+
+        if (Input.GetKeyDown(switchKey))
+        {
+            if (isSwitching) return;
+            if (blockSwitchWhileActionBusy && player.IsActionBusy) return;
+
+            int next = (currentIndex + 1) % weapons.Length;
+            StartCoroutine(SwitchWeaponRoutine(next));
+            return;
+        }
+
+        if (isSwitching) return;
+
+        if (Input.GetMouseButtonDown(0))
+        {
+            if (player.IsActionBusy) return;
+
+            if (current.weaponType == FPSWeaponType.Gun)
+            {
+                player.TryTriggerHandsAndWeaponAction(current.primaryTrigger);
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(current.secondaryTrigger))
+                {
+                    knifeAlt = !knifeAlt;
+                    string trig = knifeAlt ? current.primaryTrigger : current.secondaryTrigger;
+                    player.TryTriggerHandsAndWeaponAction(trig);
+                }
+                else
+                {
+                    player.TryTriggerHandsAndWeaponAction(current.primaryTrigger);
+                }
+            }
+        }
+
+        if (Input.GetKeyDown(KeyCode.R) && current.supportsReload)
+            player.TryTriggerHandsAndWeaponAction(current.reloadTrigger);
+
+        if (Input.GetKeyDown(KeyCode.F))
+            player.TryTriggerHandsAndWeaponAction(current.inspectTrigger);
+    }
+
+    private IEnumerator SwitchWeaponRoutine(int nextIndex)
+    {
+        if (weapons == null || weapons.Length == 0) yield break;
+        if (nextIndex < 0 || nextIndex >= weapons.Length) nextIndex = 0;
+
+        var next = weapons[nextIndex];
+        if (next == null) yield break;
+        if (nextIndex == currentIndex) yield break;
+
+        isSwitching = true;
+
+        // Disable scope during switching
+        bool prevAllowScope = player.AllowScope;
+        player.AllowScope = false;
+
+        if (logWeaponSwitch)
+        {
+            Debug.Log($"[WeaponSwitch] From {(current != null ? current.name : "None")} to {next.name}");
+            if (current != null) Debug.Log($"[WeaponSwitch] current.weaponRoot={(current.weaponRoot != null ? current.weaponRoot.name : "NULL")}");
+            Debug.Log($"[WeaponSwitch] next.weaponRoot={(next.weaponRoot != null ? next.weaponRoot.name : "NULL")}");
+        }
+
+        // 1) PullDown on current
+        if (current != null && !string.IsNullOrEmpty(current.pullDownTrigger))
+        {
+            bool started = player.TryTriggerHandsAndWeaponAction(current.pullDownTrigger);
+            if (started)
+            {
+                yield return new WaitUntil(() => player.IsActionBusy);
+                yield return new WaitUntil(() => !player.IsActionBusy);
+            }
+        }
+
+        // 2) Hide EVERYTHING (idiot-proof)
+        DisableAllWeapons();
+
+        // 3) Equip new instantly (enable only new)
+        EquipInstant(nextIndex);
+
+        if (postEnableDelay > 0f)
+            yield return new WaitForSeconds(postEnableDelay);
+
+        // 4) PullOut on new
+        if (current != null && !string.IsNullOrEmpty(current.pullOutTrigger))
+        {
+            bool started = player.TryTriggerHandsAndWeaponAction(current.pullOutTrigger);
+            if (started)
+            {
+                yield return new WaitUntil(() => player.IsActionBusy);
+                yield return new WaitUntil(() => !player.IsActionBusy);
+            }
+        }
+
+        // Restore scope for new weapon
+        player.AllowScope = current != null ? current.supportsScope : prevAllowScope;
+
+        knifeAlt = false;
+        isSwitching = false;
+    }
+
+    private void DisableAllWeapons()
+    {
+        if (weapons == null) return;
+
+        foreach (var w in weapons)
+        {
+            if (w == null) continue;
+
+            // Fallback: if weaponRoot missing, use the definition's gameObject
+            GameObject root = w.weaponRoot != null ? w.weaponRoot : w.gameObject;
+            if (root != null) root.SetActive(false);
+        }
+    }
+
+    private void EquipInstant(int index)
+    {
+        if (weapons == null || weapons.Length == 0) return;
+        if (index < 0 || index >= weapons.Length) index = 0;
+
+        currentIndex = index;
+        current = weapons[currentIndex];
+        if (current == null) return;
+
+        // Enable ONLY current
+        GameObject root = current.weaponRoot != null ? current.weaponRoot : current.gameObject;
+        if (root != null) root.SetActive(true);
+
+        if (handsAnimator != null && current.handsController != null)
+            handsAnimator.runtimeAnimatorController = current.handsController;
+
+        if (current.weaponAnimator != null && current.weaponController != null)
+            current.weaponAnimator.runtimeAnimatorController = current.weaponController;
+
+        player.AllowScope = current.supportsScope;
+        player.SetAnimators(handsAnimator, current.weaponAnimator);
+
+        knifeAlt = false;
+    }
+}
+

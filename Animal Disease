@@ -1,13 +1,10 @@
-Line:6 FireOnShootStateTime
-Line:34 PlayerMovement
-Line:760 WeaponDefinition
-Line:847 WeaponManager
-
 using UnityEngine;
 
 public class FireOnShootStateTime : StateMachineBehaviour
 {
+    [Range(0f, 1f)]
     public float fireAtNormalizedTime = 0.5f; // 0.5 = keskellä animaatiota
+
     private bool fired;
 
     public override void OnStateEnter(Animator animator, AnimatorStateInfo stateInfo, int layerIndex)
@@ -26,7 +23,7 @@ public class FireOnShootStateTime : StateMachineBehaviour
 
             var def = animator.GetComponentInParent<FPSWeaponDefinition>();
             if (def != null)
-                def.FireProjectile();
+                def.FireProjectile(); // <-- tämä korjaa virheen
         }
     }
 }
@@ -795,6 +792,34 @@ public class FPSWeaponDefinition : MonoBehaviour
     public float projectileLifetime = 4f;
     public float spawnForwardOffset = 0.02f;
 
+    [Header("Muzzle Flash (Particle System)")]
+    public ParticleSystem muzzleFlash;
+    [Tooltip("Restart particle system each shot.")]
+    public bool restartMuzzleFlash = true;
+
+    [Header("Attack Sound")]
+    [Tooltip("Assign 1 clip OR use the list below (random).")]
+    public AudioClip attackClip;
+
+    [Tooltip("If set, a random clip is chosen (overrides attackClip).")]
+    public AudioClip[] attackClips;
+
+    [Tooltip("If empty and autoFindOrCreateAudioSource is true, one will be created on weaponRoot.")]
+    public AudioSource audioSource;
+
+    [Range(0f, 1f)] public float attackVolume = 1f;
+    public bool randomPitch = true;
+    public Vector2 pitchRange = new Vector2(0.96f, 1.04f);
+
+    [Tooltip("Play sound immediately when LMB attack starts (good for knife/melee).")]
+    public bool playAttackSoundOnClick = false;
+
+    [Tooltip("Play sound when FireProjectile() is called (best for gun sync).")]
+    public bool playAttackSoundOnFireEvent = true;
+
+    [Tooltip("Auto-find or create AudioSource if missing.")]
+    public bool autoFindOrCreateAudioSource = true;
+
     private void Awake() => AutoFill();
     private void Reset() => AutoFill();
     private void OnValidate() => AutoFill();
@@ -802,12 +827,33 @@ public class FPSWeaponDefinition : MonoBehaviour
     private void AutoFill()
     {
         if (weaponRoot == null) weaponRoot = gameObject;
-        if (weaponAnimator == null) weaponAnimator = GetComponentInChildren<Animator>();
+        if (weaponAnimator == null) weaponAnimator = GetComponentInChildren<Animator>(true);
 
+        // Find muzzle (supports both "MuzzlePoint" and "Muzzle")
         if (muzzle == null)
         {
             var baseT = weaponAnimator != null ? weaponAnimator.transform : transform;
-            muzzle = FindDeepChild(baseT, "Muzzle");
+            muzzle = FindDeepChild(baseT, "MuzzlePoint");
+            if (muzzle == null) muzzle = FindDeepChild(baseT, "Muzzle");
+        }
+
+        // If muzzleFlash not assigned, try to find any ParticleSystem under muzzle
+        if (muzzleFlash == null && muzzle != null)
+        {
+            muzzleFlash = muzzle.GetComponentInChildren<ParticleSystem>(true);
+        }
+
+        // AudioSource
+        if (audioSource == null && autoFindOrCreateAudioSource)
+        {
+            audioSource = GetComponentInChildren<AudioSource>(true);
+            if (audioSource == null)
+            {
+                audioSource = weaponRoot.AddComponent<AudioSource>();
+                audioSource.playOnAwake = false;
+                // Default: 2D for player gun. Change Spatial Blend in Inspector if you want 3D.
+                audioSource.spatialBlend = 0f;
+            }
         }
     }
 
@@ -825,10 +871,38 @@ public class FPSWeaponDefinition : MonoBehaviour
         return null;
     }
 
+    /// <summary>
+    /// Called by WeaponManager on LMB attack start (optional sound for melee).
+    /// </summary>
+    public void OnAttackPressed()
+    {
+        if (playAttackSoundOnClick)
+            PlayAttackSound();
+    }
+
+    /// <summary>
+    /// Compatibility alias so old code can call def.Fire().
+    /// </summary>
+    public void Fire()
+    {
+        FireProjectile();
+    }
+
+    /// <summary>
+    /// Called at the actual shot moment (typically from animation StateMachineBehaviour).
+    /// Spawns projectile + plays muzzle flash + plays attack sound (if enabled).
+    /// </summary>
     public void FireProjectile()
     {
         if (weaponType != FPSWeaponType.Gun) return;
         if (projectilePrefab == null) return;
+
+        // Sound synced to actual fire moment (animation event)
+        if (playAttackSoundOnFireEvent)
+            PlayAttackSound();
+
+        // Muzzle flash synced to actual fire moment (animation event)
+        PlayMuzzleFlash();
 
         Transform m = muzzle != null ? muzzle : (weaponAnimator != null ? weaponAnimator.transform : transform);
         Vector3 spawnPos = m.position + m.forward * spawnForwardOffset;
@@ -841,6 +915,42 @@ public class FPSWeaponDefinition : MonoBehaviour
         Rigidbody rb = proj.GetComponent<Rigidbody>();
         if (rb != null)
             rb.linearVelocity = proj.transform.forward * muzzleVelocity;
+    }
+
+    private void PlayMuzzleFlash()
+    {
+        if (muzzleFlash == null) return;
+
+        if (restartMuzzleFlash)
+        {
+            muzzleFlash.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            muzzleFlash.Play(true);
+        }
+        else
+        {
+            if (!muzzleFlash.isPlaying) muzzleFlash.Play(true);
+        }
+    }
+
+    private void PlayAttackSound()
+    {
+        if (audioSource == null) return;
+
+        AudioClip clip = null;
+        if (attackClips != null && attackClips.Length > 0)
+            clip = attackClips[Random.Range(0, attackClips.Length)];
+        else
+            clip = attackClip;
+
+        if (clip == null) return;
+
+        float oldPitch = audioSource.pitch;
+        if (randomPitch)
+            audioSource.pitch = Random.Range(pitchRange.x, pitchRange.y);
+
+        audioSource.PlayOneShot(clip, attackVolume);
+
+        audioSource.pitch = oldPitch;
     }
 }
 
@@ -900,7 +1010,7 @@ public class FPSWeaponManager : MonoBehaviour
             {
                 if (w == null) continue;
                 if (w.weaponRoot == null) w.weaponRoot = w.gameObject;
-                if (w.weaponAnimator == null) w.weaponAnimator = w.GetComponentInChildren<Animator>();
+                if (w.weaponAnimator == null) w.weaponAnimator = w.GetComponentInChildren<Animator>(true);
             }
         }
     }
@@ -937,9 +1047,11 @@ public class FPSWeaponManager : MonoBehaviour
         {
             if (player.IsActionBusy) return;
 
+            bool started = false;
+
             if (current.weaponType == FPSWeaponType.Gun)
             {
-                player.TryTriggerHandsAndWeaponAction(current.primaryTrigger);
+                started = player.TryTriggerHandsAndWeaponAction(current.primaryTrigger);
             }
             else
             {
@@ -947,13 +1059,17 @@ public class FPSWeaponManager : MonoBehaviour
                 {
                     knifeAlt = !knifeAlt;
                     string trig = knifeAlt ? current.primaryTrigger : current.secondaryTrigger;
-                    player.TryTriggerHandsAndWeaponAction(trig);
+                    started = player.TryTriggerHandsAndWeaponAction(trig);
                 }
                 else
                 {
-                    player.TryTriggerHandsAndWeaponAction(current.primaryTrigger);
+                    started = player.TryTriggerHandsAndWeaponAction(current.primaryTrigger);
                 }
             }
+
+            // Only do "on click" behavior if the action actually started
+            if (started)
+                current.OnAttackPressed();
         }
 
         if (Input.GetKeyDown(KeyCode.R) && current.supportsReload)
@@ -974,16 +1090,8 @@ public class FPSWeaponManager : MonoBehaviour
 
         isSwitching = true;
 
-        // Disable scope during switching
         bool prevAllowScope = player.AllowScope;
         player.AllowScope = false;
-
-        if (logWeaponSwitch)
-        {
-            Debug.Log($"[WeaponSwitch] From {(current != null ? current.name : "None")} to {next.name}");
-            if (current != null) Debug.Log($"[WeaponSwitch] current.weaponRoot={(current.weaponRoot != null ? current.weaponRoot.name : "NULL")}");
-            Debug.Log($"[WeaponSwitch] next.weaponRoot={(next.weaponRoot != null ? next.weaponRoot.name : "NULL")}");
-        }
 
         // 1) PullDown on current
         if (current != null && !string.IsNullOrEmpty(current.pullDownTrigger))
@@ -996,10 +1104,10 @@ public class FPSWeaponManager : MonoBehaviour
             }
         }
 
-        // 2) Hide EVERYTHING (idiot-proof)
+        // 2) Hide everything
         DisableAllWeapons();
 
-        // 3) Equip new instantly (enable only new)
+        // 3) Equip new instantly
         EquipInstant(nextIndex);
 
         if (postEnableDelay > 0f)
@@ -1016,7 +1124,6 @@ public class FPSWeaponManager : MonoBehaviour
             }
         }
 
-        // Restore scope for new weapon
         player.AllowScope = current != null ? current.supportsScope : prevAllowScope;
 
         knifeAlt = false;
@@ -1030,8 +1137,6 @@ public class FPSWeaponManager : MonoBehaviour
         foreach (var w in weapons)
         {
             if (w == null) continue;
-
-            // Fallback: if weaponRoot missing, use the definition's gameObject
             GameObject root = w.weaponRoot != null ? w.weaponRoot : w.gameObject;
             if (root != null) root.SetActive(false);
         }
@@ -1046,7 +1151,6 @@ public class FPSWeaponManager : MonoBehaviour
         current = weapons[currentIndex];
         if (current == null) return;
 
-        // Enable ONLY current
         GameObject root = current.weaponRoot != null ? current.weaponRoot : current.gameObject;
         if (root != null) root.SetActive(true);
 
@@ -1062,4 +1166,3 @@ public class FPSWeaponManager : MonoBehaviour
         knifeAlt = false;
     }
 }
-
